@@ -44,7 +44,12 @@ def load_config():
 
 
 cfg = load_config()
-app = Flask(__name__, static_folder="static", template_folder="templates")
+# Work with either layout: the tidy one (templates/ + static/) or a flat repo
+# where index.html, app.js and style.css sit next to app.py.
+TEMPLATE_DIR = os.path.join(BASE, "templates") if os.path.isdir(os.path.join(BASE, "templates")) else BASE
+STATIC_DIR = os.path.join(BASE, "static") if os.path.isdir(os.path.join(BASE, "static")) else BASE
+# static_folder=None disables Flask's built-in /static route so our own handles it.
+app = Flask(__name__, static_folder=None)
 pj = NECProjector(cfg["projector_ip"], cfg["projector_port"])
 player = Player(cfg["media_dir"], cfg["mpv_args"])
 scheduler = BackgroundScheduler()
@@ -112,7 +117,7 @@ def unregister(sid):
 # ---------- web routes ----------
 @app.route("/")
 def index():
-    return send_from_directory("templates", "index.html")
+    return send_from_directory(TEMPLATE_DIR, "index.html")
 
 
 @app.route("/api/status")
@@ -277,7 +282,7 @@ def api_sched_delete(sid):
 
 @app.route("/static/<path:p>")
 def static_files(p):
-    return send_from_directory("static", p)
+    return send_from_directory(STATIC_DIR, p)
 
 
 def main():
