@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PX803UL Controller</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>NEC PX803UL Controller</h1>
+  <div id="status" class="status">connecting…</div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="control">Control</button>
+  <button class="tab" data-tab="media">Media &amp; Schedule</button>
+</nav>
+
+<!-- ===================== CONTROL ===================== -->
+<section id="control" class="panel active">
+  <div class="grid">
+    <div class="card">
+      <h2>Power</h2>
+      <div class="row">
+        <button class="btn green" onclick="power(true)">Power On</button>
+        <button class="btn red" onclick="power(false)">Power Off</button>
+      </div>
+      <h2>Shutter / Picture</h2>
+      <div class="row">
+        <button class="btn" onclick="shutter(true)">Shutter Open</button>
+        <button class="btn" onclick="shutter(false)">Shutter Close</button>
+      </div>
+      <div class="row">
+        <button class="btn" onclick="mute(true)">Mute On</button>
+        <button class="btn" onclick="mute(false)">Mute Off</button>
+        <button class="btn" onclick="freeze(true)">Freeze</button>
+        <button class="btn" onclick="freeze(false)">Unfreeze</button>
+      </div>
+      <h2>Input</h2>
+      <div class="row">
+        <select id="inputSel"></select>
+        <button class="btn" onclick="selectInput()">Switch</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Lens</h2>
+      <div class="row">
+        <label>Step size:</label>
+        <select id="lensStep">
+          <option value="0.25">0.25 s (fine)</option>
+          <option value="0.5" selected>0.5 s</option>
+          <option value="1.0">1.0 s (coarse)</option>
+        </select>
+      </div>
+
+      <div class="lensgroup">
+        <span class="lbl">Lens Shift</span>
+        <div class="dpad">
+          <button class="btn pad up"    onclick="lens('shift_v','plus')">▲</button>
+          <button class="btn pad left"  onclick="lens('shift_h','minus')">◀</button>
+          <button class="btn pad stop"  onclick="lensStopAll()">■</button>
+          <button class="btn pad right" onclick="lens('shift_h','plus')">▶</button>
+          <button class="btn pad down"  onclick="lens('shift_v','minus')">▼</button>
+        </div>
+      </div>
+
+      <div class="lensgroup">
+        <span class="lbl">Focus</span>
+        <div class="row">
+          <button class="btn wide" onclick="lens('focus','minus')">– Near</button>
+          <button class="btn wide" onclick="lens('focus','plus')">Far +</button>
+        </div>
+        <span class="lbl">Zoom</span>
+        <div class="row">
+          <button class="btn wide" onclick="lens('zoom','minus')">– Out</button>
+          <button class="btn wide" onclick="lens('zoom','plus')">In +</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <button class="btn small" onclick="lensMem('move')">Recall Lens Memory</button>
+        <button class="btn small" onclick="lensMem('store')">Store</button>
+        <button class="btn small" onclick="readLens()">Read Positions</button>
+      </div>
+      <pre id="lensReadout" class="readout"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Raw command (advanced / testing)</h2>
+      <p class="hint">Hex bytes, space-separated. Use this to confirm the correct
+      input code for your firmware if a preset input errors out.</p>
+      <div class="row">
+        <input id="rawHex" type="text" placeholder="02 03 00 00 02 01 1A">
+        <label class="chk"><input type="checkbox" id="rawCks"> add checksum</label>
+        <button class="btn" onclick="sendRaw()">Send</button>
+      </div>
+      <pre id="rawReply" class="readout"></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== MEDIA ===================== -->
+<section id="media" class="panel">
+  <div class="grid">
+    <div class="card">
+      <h2>Media Library</h2>
+      <div class="row">
+        <input type="file" id="fileInput">
+        <button class="btn" onclick="upload()">Upload</button>
+      </div>
+      <div id="uploadMsg" class="hint"></div>
+      <ul id="mediaList" class="medialist"></ul>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="loopNow" checked> Loop</label>
+        <button class="btn green" onclick="playNow()">Play Selected Now</button>
+        <button class="btn red" onclick="stopNow()">Stop</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>New Schedule</h2>
+      <label>Name</label>
+      <input id="sName" type="text" placeholder="Evening loop">
+      <label>Files (order matters; checked items above are used)</label>
+      <div id="schedFiles" class="hint">Select files in the library list →</div>
+      <div class="row">
+        <div><label>Start</label><input id="sStart" type="time" value="18:00"></div>
+        <div><label>End (optional)</label><input id="sEnd" type="time"></div>
+      </div>
+      <label>Days</label>
+      <div id="daysRow" class="days"></div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="sLoop" checked> Loop until end</label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="sCtrl"> Power projector on at start</label>
+        <label class="chk"><input type="checkbox" id="sOff"> Power off at end</label>
+      </div>
+      <div class="row">
+        <label>Input on start</label>
+        <select id="sInput"></select>
+      </div>
+      <button class="btn green" onclick="createSchedule()">Create Schedule</button>
+    </div>
+
+    <div class="card">
+      <h2>Active Schedules</h2>
+      <ul id="schedList" class="medialist"></ul>
+    </div>
+  </div>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

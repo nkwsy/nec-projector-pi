@@ -1,0 +1,21 @@
+[Unit]
+Description=NEC PX803UL Web Controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/projector-controller
+ExecStart=/home/pi/projector-controller/venv/bin/python app.py
+Restart=on-failure
+RestartSec=5
+
+# mpv needs access to the display. For a desktop (X) session, point it at the
+# logged-in display. For a headless console/DRM setup, remove the two lines below
+# and add "--vo=gpu", "--gpu-context=drm" to mpv_args in config.json instead.
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+[Install]
+WantedBy=multi-user.target

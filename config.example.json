@@ -1,0 +1,13 @@
+{
+  "projector_ip": "192.168.0.10",
+  "projector_port": 7142,
+  "web_port": 8080,
+  "default_input": "HDMI",
+  "mpv_args": [
+    "--fullscreen",
+    "--no-terminal",
+    "--no-osc",
+    "--keep-open=no"
+  ],
+  "allowed_extensions": ["mp4", "mkv", "mov", "avi", "webm", "m4v", "jpg", "jpeg", "png"]
+}
