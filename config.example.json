@@ -3,6 +3,16 @@
   "projector_port": 7142,
   "web_port": 8080,
   "default_input": "HDMI",
+
+  "auth_user": "admin",
+  "auth_password": "change-me-please",
+
+  "audio_device": "auto",
+  "audio_mute": false,
+
+  "max_download_height": 1080,
+  "download_container": "mkv",
+
   "mpv_args": [
     "--fullscreen",
     "--no-terminal",
@@ -11,5 +21,5 @@
     "--gpu-context=drm",
     "--keep-open=no"
   ],
-  "allowed_extensions": ["mp4", "mkv", "mov", "avi", "webm", "m4v", "jpg", "jpeg", "png"]
+  "allowed_extensions": ["mp4", "mkv", "mov", "avi", "webm", "m4v", "jpg", "jpeg", "png", "gif", "webp"]
 }

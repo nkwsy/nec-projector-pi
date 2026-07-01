@@ -1,23 +1,33 @@
 """
 app.py - Web server for the NEC PX803UL controller.
 
-Serves the control panel UI and a REST API, runs media playback on the Pi,
-and fires scheduled playback jobs (with optional projector power control).
+Serves the control panel UI and a REST API, runs media playback on the Pi
+(local files, images/slideshow, RTSP), downloads videos via yt-dlp, generates
+thumbnails/previews, and fires scheduled playback jobs (with optional projector
+power control). Optionally gated behind HTTP Basic auth.
 """
 
+import base64
+import hmac
 import json
+import logging
 import os
 import shutil
 import tempfile
 import uuid
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from werkzeug.utils import secure_filename
 
 from nec import NECProjector, INPUTS, LENS_AXES
-from player import Player
+from player import Player, validate_rtsp
+from downloader import Downloader, ytdlp_version
+import media_util
+
+log = logging.getLogger("projector")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -33,7 +43,18 @@ DEFAULTS = {
     "default_input": "HDMI",
     "max_upload_mb": 4096,
     "allowed_extensions": ["mp4", "mkv", "mov", "avi", "webm", "m4v",
-                           "jpg", "jpeg", "png"],
+                           "jpg", "jpeg", "png", "gif", "webp"],
+    # audio
+    "audio_device": "auto",
+    "audio_mute": False,
+    # downloads
+    "max_download_height": 1080,
+    "download_container": "mkv",
+    "download_allowed_hosts": None,       # None -> module default allowlist
+    "download_cookiefile": None,
+    # auth (empty password disables the gate; set one to protect the panel)
+    "auth_user": "admin",
+    "auth_password": "",
 }
 
 
@@ -65,10 +86,60 @@ STATIC_DIR = os.path.join(BASE, "static") if os.path.isdir(os.path.join(BASE, "s
 app = Flask(__name__, static_folder=None)
 # Reject oversized uploads before they're buffered to disk.
 app.config["MAX_CONTENT_LENGTH"] = int(cfg["max_upload_mb"]) * 1024 * 1024
+
 pj = NECProjector(cfg["projector_ip"], cfg["projector_port"])
-player = Player(cfg["media_dir"], cfg["mpv_args"])
-scheduler = BackgroundScheduler()
+player = Player(cfg["media_dir"], cfg["mpv_args"],
+                audio_device=cfg.get("audio_device", "auto"),
+                mute=cfg.get("audio_mute", False))
+dl = Downloader(cfg["media_dir"],
+                max_height=cfg.get("max_download_height", 1080),
+                merge_format=cfg.get("download_container", "mkv"),
+                allowed_hosts=cfg.get("download_allowed_hosts"),
+                cookiefile=cfg.get("download_cookiefile"))
+# misfire_grace_time: still fire a start/end job that's a few minutes late (a busy
+# Pi, a clock jump, or the 35s power-on sleep can delay a worker) instead of
+# silently dropping it. coalesce: collapse a backlog into one run.
+scheduler = BackgroundScheduler(
+    job_defaults={"misfire_grace_time": 300, "coalesce": True})
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _valid_hhmm(s):
+    if not isinstance(s, str):
+        return False
+    parts = s.split(":")
+    if len(parts) != 2:
+        return False
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return 0 <= h <= 23 and 0 <= m <= 59
+
+# ---------- auth ----------
+AUTH_USER = cfg.get("auth_user", "admin")
+AUTH_PASS = cfg.get("auth_password") or ""
+if not AUTH_PASS:
+    log.warning("No auth_password set in config.json — the panel is UNPROTECTED. "
+                "Anyone on the network can control the projector. Set one, and "
+                "keep port %s off the public internet.", cfg["web_port"])
+
+
+@app.before_request
+def _require_auth():
+    if not AUTH_PASS:
+        return None
+    hdr = request.headers.get("Authorization", "")
+    if hdr.startswith("Basic "):
+        try:
+            user, _, pw = base64.b64decode(hdr[6:]).decode("utf-8").partition(":")
+        except Exception:
+            user = pw = ""
+        if (hmac.compare_digest(user, AUTH_USER)
+                and hmac.compare_digest(pw, AUTH_PASS)):
+            return None
+    return Response("Authentication required", 401,
+                    {"WWW-Authenticate": 'Basic realm="Projector Controller"'})
 
 
 # ---------- schedule persistence ----------
@@ -85,6 +156,20 @@ def save_schedules(items):
 
 
 # ---------- schedule actions (run by the scheduler) ----------
+def _start_source(source_type, params, owner=None):
+    """Dispatch a playback request by source type (shared by /api/play + jobs)."""
+    if source_type == "rtsp":
+        player.play_rtsp(params["url"], owner=owner)
+    elif source_type == "slideshow":
+        player.play_slideshow(params["files"],
+                              duration=params.get("duration", 8),
+                              loop=params.get("loop", True),
+                              shuffle=params.get("shuffle", False),
+                              owner=owner)
+    else:
+        player.play(params["files"], loop=params.get("loop", True), owner=owner)
+
+
 def job_start(sched):
     if sched.get("control_projector"):
         pj.power_on()
@@ -96,11 +181,19 @@ def job_start(sched):
         inp = sched.get("input") or cfg["default_input"]
         if inp in INPUTS:
             pj.input_select_name(inp)
-    player.play(sched["files"], loop=sched.get("loop", True))
+    _start_source(sched.get("source_type", "files"), {
+        "files": sched.get("files", []),
+        "url": sched.get("rtsp_url"),
+        "loop": sched.get("loop", True),
+        "duration": sched.get("duration", 8),
+        "shuffle": sched.get("shuffle", False),
+    }, owner=sched["id"])
 
 
 def job_end(sched):
-    player.stop()
+    # Only stop if this schedule is what's actually playing — don't tear down a
+    # manual playback or an overlapping schedule that's still meant to run.
+    player.stop_owned(sched["id"])
     if sched.get("control_projector"):
         pj.shutter_close()
         if sched.get("power_off_at_end"):
@@ -141,6 +234,10 @@ def api_status():
     st["playback"] = player.status()
     st["inputs"] = list(INPUTS.keys())
     st["axes"] = list(LENS_AXES.keys())
+    st["features"] = {
+        "ytdlp": ytdlp_version(),
+        "ffmpeg": media_util.ffmpeg_available(),
+    }
     return jsonify(st)
 
 
@@ -218,9 +315,53 @@ def allowed(name):
 
 @app.route("/api/media")
 def api_media_list():
+    """Bare filename list (kept for backward compatibility)."""
     files = sorted(f for f in os.listdir(cfg["media_dir"])
                    if os.path.isfile(os.path.join(cfg["media_dir"], f)))
     return jsonify({"files": files})
+
+
+@app.route("/api/media/info")
+def api_media_info():
+    """Richer list: size + whether each item is an image / browser-previewable."""
+    items = []
+    for f in sorted(os.listdir(cfg["media_dir"])):
+        p = os.path.join(cfg["media_dir"], f)
+        if not os.path.isfile(p):
+            continue
+        items.append({
+            "name": f,
+            "size_mb": round(os.path.getsize(p) / 1048576, 1),
+            "is_image": media_util.is_image(f),
+            "previewable": media_util.previewable(f),
+        })
+    return jsonify({"items": items})
+
+
+@app.route("/api/media/thumb/<path:name>")
+def api_media_thumb(name):
+    t = media_util.ensure_thumb(cfg["media_dir"], name)
+    if not t:
+        return ("", 404)
+    return send_file(t, mimetype="image/jpeg", conditional=True)
+
+
+_PREVIEW_MIME = {
+    "mp4": "video/mp4", "m4v": "video/mp4", "webm": "video/webm",
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "gif": "image/gif", "webp": "image/webp",
+}
+
+
+@app.route("/api/media/preview/<path:name>")
+def api_media_preview(name):
+    p = media_util.safe_media_path(cfg["media_dir"], name)
+    if not p:
+        return ("", 404)
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    mt = _PREVIEW_MIME.get(ext, "application/octet-stream")
+    # conditional=True gives us HTTP Range (206) support so browsers can seek.
+    return send_file(p, mimetype=mt, conditional=True)
 
 
 @app.route("/api/disk")
@@ -254,6 +395,8 @@ def api_media_upload():
     if not allowed(f.filename):
         return jsonify({"ok": False, "error": "type not allowed"}), 400
     name = secure_filename(f.filename)
+    if not name:
+        return jsonify({"ok": False, "error": "invalid filename"}), 400
     dest = os.path.join(cfg["media_dir"], name)
     try:
         f.save(dest)
@@ -263,25 +406,95 @@ def api_media_upload():
         _, _, free = shutil.disk_usage(cfg["media_dir"])
         return jsonify({"ok": False, "error": f"Save failed ({e.strerror}). "
                         f"Only {round(free/1048576)} MB free."}), 507
+    media_util.ensure_thumb_async(cfg["media_dir"], name)
     return jsonify({"ok": True, "name": name})
 
 
 @app.route("/api/media/<name>", methods=["DELETE"])
 def api_media_delete(name):
-    path = os.path.join(cfg["media_dir"], secure_filename(name))
-    if os.path.exists(path):
+    path = media_util.safe_media_path(cfg["media_dir"], name)
+    if path:
         os.remove(path)
+        media_util.remove_thumb(cfg["media_dir"], name)
         return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "not found"}), 404
 
 
+# ---------- downloads ----------
+@app.route("/api/download", methods=["POST"])
+def api_download():
+    url = (request.json or {}).get("url", "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "no url"}), 400
+    _, _, free = shutil.disk_usage(cfg["media_dir"])
+    if free < 500 * 1048576:
+        return jsonify({"ok": False, "error": "Low disk space"}), 507
+    try:
+        jid = dl.start(url)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 501
+    return jsonify({"ok": True, "id": jid})
+
+
+@app.route("/api/downloads")
+def api_downloads():
+    return jsonify({"jobs": dl.status()})
+
+
+@app.route("/api/download/<jid>")
+def api_download_status(jid):
+    st = dl.status(jid)
+    return (jsonify(st), 200) if st else (jsonify({"error": "not found"}), 404)
+
+
+@app.route("/api/download/<jid>/cancel", methods=["POST"])
+def api_download_cancel(jid):
+    return jsonify({"ok": dl.cancel(jid)})
+
+
+# ---------- audio ----------
+@app.route("/api/audio/devices")
+def api_audio_devices():
+    return jsonify({"devices": player.list_audio_devices(),
+                    "current": player.audio_device, "mute": player.mute})
+
+
+@app.route("/api/audio/device", methods=["POST"])
+def api_audio_device():
+    dev = (request.json or {}).get("device", "auto")
+    devs = player.list_audio_devices()
+    # Only reject against a non-empty list; an empty list means the mpv IPC query
+    # failed/timed out (e.g. mid RTSP restart), not that the device is invalid.
+    if devs:
+        valid = {"auto"} | {d.get("name") for d in devs}
+        if dev not in valid:
+            return jsonify({"ok": False, "error": "unknown device"}), 400
+    return jsonify({"ok": player.set_audio_device(dev), "device": dev})
+
+
+@app.route("/api/audio/mute", methods=["POST"])
+def api_audio_mute():
+    on = bool((request.json or {}).get("on"))
+    return jsonify({"ok": player.set_mute(on), "mute": on})
+
+
+# ---------- playback ----------
 @app.route("/api/play", methods=["POST"])
 def api_play():
-    d = request.json
+    d = request.json or {}
+    st = d.get("source_type", "files")
     try:
-        player.play(d["files"], loop=d.get("loop", True))
+        _start_source(st, {
+            "files": d.get("files", []),
+            "url": d.get("url", ""),
+            "loop": d.get("loop", True),
+            "duration": d.get("duration", 8),
+            "shuffle": d.get("shuffle", False),
+        })
         return jsonify({"ok": True})
-    except Exception as e:
+    except (ValueError, FileNotFoundError, KeyError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
@@ -298,23 +511,51 @@ def api_sched_list():
 
 @app.route("/api/schedules", methods=["POST"])
 def api_sched_create():
-    d = request.json
+    d = request.json or {}
+    source_type = d.get("source_type", "files")
+    rtsp_url = d.get("rtsp_url")
+    # Validate BEFORE persisting — an unchecked start/days used to be written to
+    # schedules.json even when register() then threw, permanently crash-looping
+    # the service on the next boot (it re-registers every saved schedule).
+    start = d.get("start")
+    end = d.get("end") or None
+    days = d.get("days") or DAYS
+    if not _valid_hhmm(start):
+        return jsonify({"ok": False, "error": "Invalid start time (use HH:MM)"}), 400
+    if end is not None and not _valid_hhmm(end):
+        return jsonify({"ok": False, "error": "Invalid end time (use HH:MM)"}), 400
+    if not (isinstance(days, list) and days and all(x in DAYS for x in days)):
+        return jsonify({"ok": False, "error": "Invalid days"}), 400
+    if source_type == "rtsp":
+        try:
+            rtsp_url = validate_rtsp(rtsp_url)
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+    elif not d.get("files"):
+        return jsonify({"ok": False, "error": "Select at least one file"}), 400
     sched = {
         "id": uuid.uuid4().hex[:8],
         "name": d.get("name", "Untitled"),
-        "files": d["files"],
-        "start": d["start"],                       # "HH:MM"
-        "end": d.get("end"),                       # "HH:MM" or null
-        "days": d.get("days") or DAYS,             # list of mon..sun
+        "source_type": source_type,                # files | slideshow | rtsp
+        "files": d.get("files", []),               # ordered list (files/slideshow)
+        "rtsp_url": rtsp_url,                       # for rtsp
+        "duration": d.get("duration", 8),          # per-image seconds (slideshow)
+        "shuffle": d.get("shuffle", False),        # slideshow
+        "start": start,                            # "HH:MM"
+        "end": end,                                # "HH:MM" or null
+        "days": days,                              # list of mon..sun
         "loop": d.get("loop", True),
         "control_projector": d.get("control_projector", False),
         "power_off_at_end": d.get("power_off_at_end", False),
         "input": d.get("input", cfg["default_input"]),
     }
+    try:
+        register(sched)                            # validated above, shouldn't throw
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not schedule: {e}"}), 400
     items = load_schedules()
     items.append(sched)
     save_schedules(items)
-    register(sched)
     return jsonify({"ok": True, "schedule": sched})
 
 
@@ -332,8 +573,18 @@ def static_files(p):
 
 
 def main():
+    # Bring mpv up first so the projector shows solid black immediately, before
+    # network/scheduler come up (this is the "elegant boot" behaviour).
+    try:
+        player.ensure_running()
+    except Exception as e:
+        log.warning("Could not start mpv holder at boot: %s", e)
     for s in load_schedules():
-        register(s)
+        # Never let one bad persisted schedule crash-loop the whole service.
+        try:
+            register(s)
+        except Exception as e:
+            log.warning("Skipping invalid schedule %s: %s", s.get("id"), e)
     scheduler.start()
     app.run(host="0.0.0.0", port=cfg["web_port"], threaded=True)
 

@@ -1,22 +1,27 @@
 [Unit]
 Description=NEC PX803UL Web Controller
-After=network-online.target
-Wants=network-online.target
+# Not gated on the network: mpv should grab the display and paint black as early
+# as possible (elegant boot). Projector/network commands just retry once the
+# network is up.
+After=local-fs.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/pi/nec-projector-pi
 ExecStart=/home/pi/nec-projector-pi/venv/bin/python app.py
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
+
+# Private runtime dir for mpv's IPC socket (/run/projector, mode 0700).
+RuntimeDirectory=projector
+RuntimeDirectoryMode=0700
 
 # --- Headless (no desktop) display setup ---------------------------------
-# mpv renders straight to the projector via DRM/KMS (config.json mpv_args must
-# include "--vo=gpu", "--gpu-context=drm"). To modeset the screen mpv has to
-# become the DRM "master", which on a bare console needs root (or a logind
-# seat) plus a free virtual terminal to draw on. Running as root is the
-# simplest for an appliance; we hand mpv tty1 and keep it free by disabling
-# getty@tty1 (see README §5). Boot the Pi to console, not desktop.
+# One persistent mpv renders straight to the projector via DRM/KMS and holds a
+# black frame from boot (config.json mpv_args must include "--vo=gpu",
+# "--gpu-context=drm"). To modeset the screen mpv must become the DRM "master",
+# which on a bare console needs root plus a free virtual terminal; we hand it
+# tty1 and keep it free by masking getty@tty1 (see README §5). Boot to console.
 User=root
 TTYPath=/dev/tty1
 StandardInput=tty-force

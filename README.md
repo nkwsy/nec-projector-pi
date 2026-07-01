@@ -48,8 +48,12 @@ After it boots, SSH in and update:
 
 ```bash
 sudo apt update && sudo apt full-upgrade -y
-sudo apt install -y python3-venv python3-pip mpv git
+sudo apt install -y python3-venv python3-pip mpv ffmpeg git
 ```
+
+`ffmpeg` powers thumbnails, in-browser previews, and merging downloaded videos.
+For hardware recommendations (Pi model, storage, audio, cooling) see
+[HARDWARE.md](HARDWARE.md).
 
 ---
 
@@ -103,7 +107,8 @@ python3 -m venv venv
 cp config.example.json config.json
 ```
 
-Edit `config.json` and set at least `projector_ip` (e.g. `192.168.0.10`).
+Edit `config.json` and set at least `projector_ip` (e.g. `192.168.0.10`) and an
+`auth_password` (the panel is otherwise unprotected — see [§8](#8-security)).
 
 Run it:
 
@@ -128,26 +133,37 @@ to the projector via DRM/KMS. This is the default `config.json` shipped here:
              "--vo=gpu", "--gpu-context=drm", "--keep-open=no"]
 ```
 
-Set the Pi up so nothing else owns the display:
+**Elegant boot — one command.** The included setup script boots the Pi to a
+clean **black** screen (no rainbow, no kernel text, no blinking cursor) and
+installs the extras this app needs. Run it once:
 
 ```bash
-# Boot to the text console instead of the desktop
-sudo raspi-config nonint do_boot_behaviour B1
-#   (or: sudo raspi-config → System Options → Boot / Auto Login → Console)
-
-# Free tty1 so mpv can take over the screen (the service claims it)
-sudo systemctl disable getty@tty1.service
-
-# Confirm the modern KMS driver is active (default on Bookworm):
-#   /boot/firmware/config.txt should contain  dtoverlay=vc4-kms-v3d
+sudo bash scripts/setup-pi.sh
 ```
+
+It: installs `ffmpeg`; edits `/boot/firmware/{config.txt,cmdline.txt}` to hide
+the boot console (redirects it to a hidden VT, kills the cursor/logo/rainbow);
+masks `getty@tty1` so `mpv` can own the screen; installs a weekly `yt-dlp`
+auto-updater; and optionally installs the service. Every file it changes is
+backed up to `*.bak-projector`. Reboot afterwards.
+
+**How the black screen stays black:** the app starts **one long-lived `mpv`** at
+boot with `--idle --force-window`, so it grabs the DRM/KMS display the instant
+the Pi is up and holds a solid black frame. Content is swapped in over mpv's IPC
+socket — no per-clip relaunch, so there's no "no-signal" flash between videos,
+and audio device/mute changes apply live.
 
 To modeset the screen `mpv` must become the DRM *master*, which on a bare
 console needs root plus a free virtual terminal — that's why the systemd unit
 (section 6) runs as `root` on `tty1`. After a reboot, test from the panel's
-**Media** tab (upload a clip, tick it, press **Play Selected Now**). If audio
-over HDMI is missing, add `--audio-device=...` to `mpv_args` (list devices with
-`mpv --audio-device=help`; ALSA HDMI is typically `alsa/hdmi:CARD=vc4hdmi0`).
+**Media** tab (upload a clip, tick it, press **Play Selected Now**). HDMI audio
+works by default; pick a different output in the panel's **Audio output**
+dropdown (see [§7](#7-using-the-panel)).
+
+> Prefer to do it by hand? The equivalent manual steps are: `sudo raspi-config
+> nonint do_boot_behaviour B1` (boot to console), `sudo systemctl disable
+> getty@tty1`, and confirm `dtoverlay=vc4-kms-v3d` in `/boot/firmware/config.txt`.
+> You'll get working playback but not the fully clean boot the script sets up.
 
 **Raspberry Pi OS with Desktop (alternative):** switch `mpv_args` back to the
 non-DRM defaults (drop `--vo=gpu`/`--gpu-context=drm`) and edit the service unit
@@ -198,23 +214,43 @@ comments show what to change for a desktop session instead.
 
 **Media & Schedule tab**
 
-- **Library** — upload videos/images, delete them, tick the ones you want.
-- **Play Selected Now** plays the ticked files immediately (looping if "Loop" is
-  ticked). Multiple ticked files play as a playlist in list order.
-- **New Schedule** — give it a name, tick files in the library, set a **Start**
-  (and optional **End**) time and the **days** of the week. Options:
-  - *Loop until end* — repeat the playlist until the end time.
-  - *Power projector on at start* — powers up the projector, waits for it to
-    warm up, opens the shutter, and selects the input automatically.
-  - *Power off at end* — shuts the projector down when the schedule ends.
+- **Add Media** — upload a file, or paste a **YouTube/Vimeo URL** to download it
+  straight into the library (up to 1080p, progress shown live; Cancel to abort).
+  Only allow-listed sites are accepted. To support more sites, add hostnames to
+  `download_allowed_hosts` in `config.json`; for age/bot-gated videos set
+  `download_cookiefile` to a Netscape `cookies.txt` path.
+- **Library** — a thumbnail grid. Click any thumbnail to **preview** it in the
+  browser (video for mp4/webm/images; other containers show a poster frame and
+  still play fine on the projector). Tick items to select them.
+- **Play Selected Now** plays the ticked files immediately as a playlist in list
+  order (looping if "Loop" is ticked). Tick **As slideshow** + a seconds/image
+  value to show images (or mixed images+clips) as a timed slideshow.
+- **Live RTSP stream** — paste an `rtsp://` camera/stream URL and **Play Stream**.
+  It auto-reconnects if the stream drops. Press **Stop** to return to black.
+- **Audio output** — pick HDMI / USB / analog from the dropdown; changes apply
+  live. **Mute** toggles sound without stopping playback. (Bluetooth and
+  streaming audio to phones need extra setup — see [§9](#9-optional-audio-outputs).)
+- **New Schedule** — name it, pick a **Source type** (video files, image
+  slideshow, or RTSP), then:
+  - *Files/slideshow*: tick files and **drag (or use ↑↓) to set play order**.
+    Slideshow adds a per-image duration and optional shuffle.
+  - *RTSP*: enter the stream URL.
+  - Set **Start** (and optional **End**) time and the **days** of the week.
+  - *Loop until end* — repeat until the end time.
+  - *Power projector on at start* — powers up, warms up, opens the shutter, and
+    selects the input automatically. *Power off at end* — shuts it down at End.
 - Schedules persist to `schedules.json` and re-arm automatically when the
   service restarts.
 
 Examples of what the scheduler covers:
-- *"Play loop.mp4 at 18:00 on repeat until 22:00, every day"* → one file,
-  Loop on, Start 18:00, End 22:00, all days.
-- *"Play this series of videos starting at 09:00"* → tick the files in order,
-  Start 09:00, leave End blank (or set one), Loop off for a single pass.
+- *"Play loop.mp4 at 18:00 on repeat until 22:00, every day"* → Files source,
+  one file, Loop on, Start 18:00, End 22:00, all days.
+- *"Play this series of videos starting at 09:00"* → Files source, tick files and
+  order them, Start 09:00, leave End blank, Loop off for a single pass.
+- *"Show the lobby photos on a 10-second loop"* → Slideshow source, tick images,
+  10 s/image, Loop on.
+- *"Put the entrance camera up during the event"* → RTSP source with the camera
+  URL.
 
 ---
 
@@ -239,22 +275,61 @@ Examples of what the scheduler covers:
   I'll bake it into `INPUTS` in `nec.py` (or edit that dict yourself).
 - **Lens won't reach expected focus/zoom:** run **Lens Calibration** from the
   projector remote (INFO/L-CALIB. while holding CTL) after any lens change.
-- **Security:** this panel has no login and is meant for a trusted home/LAN. Don't
-  expose port 8080 to the internet. If you need remote access, use a VPN such as
-  Tailscale or WireGuard rather than port-forwarding.
+- **"yt-dlp not installed" / "ffmpeg not found" banner:** install them
+  (`sudo apt install ffmpeg`; `./venv/bin/pip install -U yt-dlp`) and restart.
+- **Downloads suddenly fail from YouTube:** yt-dlp goes stale every few weeks.
+  `scripts/setup-pi.sh` installs a weekly updater; force it with
+  `sudo systemctl start ytdlp-update`.
+- **No thumbnails / previews:** `ffmpeg` is missing, or the file is a container
+  the browser can't play inline (mkv/avi/mov show a poster frame instead).
+- **RTSP won't play:** confirm the URL works in VLC/`ffprobe` from the Pi; the
+  app forces TCP transport for reliability. Credentials in the URL are redacted
+  from status/logs.
+
+### Security
+
+You set an `auth_password` in `config.json`, so the panel prompts for a login
+(user `auth_user`, default `admin`). Still treat it as a **trusted-LAN**
+appliance:
+
+- **Never expose port 8080 to the internet.** It runs as root and can send raw
+  bytes to the projector and download arbitrary URLs. For remote access use a VPN
+  (Tailscale/WireGuard), not port-forwarding.
+- Basic-auth is only as private as the network — put it behind HTTPS (a reverse
+  proxy) if you want the password encrypted in transit.
+- The download feature is limited to an allow-list of sites and refuses URLs that
+  resolve to private/loopback addresses (anti-SSRF). RTSP URLs are scheme-checked.
 
 ---
 
-## 9. File overview
+## 9. Optional audio outputs
+
+HDMI / USB / analog output works out of the box. Two extras need OS-level setup
+and are documented separately:
+
+- **Bluetooth speaker** — [docs/bluetooth-audio.md](docs/bluetooth-audio.md).
+  Requires running the service as the `pi` user with PipeWire; adds ~150–250 ms
+  latency (not lip-sync).
+- **Stream audio to phones** (browser, for silent venues) —
+  [docs/audio-to-phone.md](docs/audio-to-phone.md). Icecast + an ffmpeg/ALSA
+  tee; ~3–8 s latency; fans out to many listeners.
+
+---
+
+## 10. File overview
 
 | File | Purpose |
 |------|---------|
 | `nec.py` | NEC binary control library (TCP 7142), all commands checksum-verified against NEC's reference manual |
-| `player.py` | mpv playback controller (launch/stop/loop, IPC) |
-| `app.py` | Flask web server, REST API, APScheduler timed jobs |
-| `templates/index.html`, `static/` | the web UI |
+| `player.py` | mpv playback controller — one persistent idle-black mpv; files, slideshow, RTSP, live audio, all over IPC |
+| `downloader.py` | yt-dlp download jobs (background threads, URL allow-listing, progress) |
+| `media_util.py` | safe media-path resolution, ffmpeg thumbnails, format helpers |
+| `app.py` | Flask web server, REST API, auth gate, APScheduler timed jobs |
+| `index.html`, `app.js`, `style.css` | the web UI (also works under `templates/` + `static/`) |
 | `config.example.json` | copy to `config.json` and edit |
-| `projector-controller.service` | systemd autostart unit |
+| `projector-controller.service` | systemd autostart unit (headless, root on tty1) |
+| `scripts/setup-pi.sh` | one-shot headless setup: ffmpeg, clean boot, getty mask, yt-dlp updater |
+| `HARDWARE.md`, `docs/` | hardware BOM and optional-audio (Bluetooth, phone-streaming) guides |
 
 All projector command byte sequences come from NEC's *Projector Control Command
 Reference Manual* (doc BDT140013/BDT140014) and were checksum-verified during build.

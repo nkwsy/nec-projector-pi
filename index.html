@@ -104,27 +104,89 @@
 <!-- ===================== MEDIA ===================== -->
 <section id="media" class="panel">
   <div class="grid">
+
+    <!-- Add media: upload + download -->
     <div class="card">
-      <h2>Media Library</h2>
+      <h2>Add Media</h2>
+      <label>Upload a file</label>
       <div class="row">
         <input type="file" id="fileInput">
         <button class="btn" onclick="upload()">Upload</button>
       </div>
       <div id="uploadMsg" class="hint"></div>
-      <ul id="mediaList" class="medialist"></ul>
+
+      <h2>Download from a link</h2>
+      <p class="hint" id="dlHint">Paste a YouTube/Vimeo URL. Downloads at up to 1080p
+      into the library.</p>
+      <div class="row">
+        <input id="dlUrl" type="text" placeholder="https://www.youtube.com/watch?v=…">
+        <button class="btn" onclick="startDownload()">Download</button>
+      </div>
+      <ul id="dlList" class="dllist"></ul>
+    </div>
+
+    <!-- Library + immediate playback -->
+    <div class="card">
+      <h2>Library</h2>
+      <p class="hint">Tick items to play now. Click a thumbnail to preview.</p>
+      <div id="mediaGrid" class="mediagrid"></div>
       <div class="row">
         <label class="chk"><input type="checkbox" id="loopNow" checked> Loop</label>
+        <label class="chk"><input type="checkbox" id="ssNow"> As slideshow</label>
+        <input id="ssDur" type="number" min="1" value="8" title="seconds per image"
+               style="max-width:70px" disabled>
+        <span class="hint">sec/img</span>
+      </div>
+      <div class="row">
         <button class="btn green" onclick="playNow()">Play Selected Now</button>
         <button class="btn red" onclick="stopNow()">Stop</button>
       </div>
+
+      <h2>Live RTSP stream</h2>
+      <div class="row">
+        <input id="rtspUrl" type="text" placeholder="rtsp://user:pass@camera-ip:554/stream">
+        <button class="btn" onclick="playRtsp()">Play Stream</button>
+      </div>
+
+      <h2>Audio output</h2>
+      <div class="row">
+        <select id="audioDev"></select>
+        <button class="btn small" onclick="loadAudio()">↻</button>
+        <label class="chk"><input type="checkbox" id="audioMute" onchange="setMute()"> Mute</label>
+      </div>
+      <p class="hint">Changes apply live. HDMI is the default (in-sync, no extra
+      hardware).</p>
     </div>
 
+    <!-- New schedule -->
     <div class="card">
       <h2>New Schedule</h2>
       <label>Name</label>
       <input id="sName" type="text" placeholder="Evening loop">
-      <label>Files (tick the ones to include; playback follows list order)</label>
-      <ul id="schedFiles" class="medialist"><li class="hint">Loading files…</li></ul>
+
+      <label>Source type</label>
+      <select id="sType" onchange="onSourceType()">
+        <option value="files">Video files (playlist)</option>
+        <option value="slideshow">Image slideshow</option>
+        <option value="rtsp">RTSP stream</option>
+      </select>
+
+      <div id="sFilesWrap">
+        <label>Files (tick to include; drag or use ↑↓ to set play order)</label>
+        <ul id="schedFiles" class="orderlist"><li class="hint">Loading files…</li></ul>
+      </div>
+
+      <div id="sSlideWrap" style="display:none">
+        <label>Seconds per image</label>
+        <input id="sDur" type="number" min="1" value="8">
+        <label class="chk"><input type="checkbox" id="sShuffle"> Shuffle order</label>
+      </div>
+
+      <div id="sRtspWrap" style="display:none">
+        <label>RTSP URL</label>
+        <input id="sRtsp" type="text" placeholder="rtsp://user:pass@camera-ip:554/stream">
+      </div>
+
       <div class="row">
         <div><label>Start</label><input id="sStart" type="time" value="18:00"></div>
         <div><label>End (optional)</label><input id="sEnd" type="time"></div>
@@ -151,6 +213,14 @@
     </div>
   </div>
 </section>
+
+<!-- Preview modal -->
+<div id="previewModal" class="modal" onclick="closePreview(event)">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closePreview()">✕</button>
+    <div id="previewBody"></div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

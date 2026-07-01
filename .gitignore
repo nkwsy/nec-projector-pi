@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Local runtime state (not for version control)
+config.json
+schedules.json
+media/
