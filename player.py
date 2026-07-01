@@ -32,6 +32,32 @@ class Player:
         self.proc = None
         self.current = []
 
+    # --- display -----------------------------------------------------------
+    def _display_env(self):
+        """Build the environment mpv needs to reach the screen.
+
+        Raspberry Pi OS Bookworm's desktop is Wayland (labwc/wayfire), so mpv
+        needs WAYLAND_DISPLAY to find the compositor. A launcher that only sets
+        DISPLAY=:0 (as the systemd unit historically did) leaves mpv trying an
+        X server that isn't there, and playback silently fails. We look for a
+        wayland socket in the runtime dir and use it; if none exists we fall
+        back to X11 (real desktop X session or headless DRM, which ignore it).
+        """
+        env = os.environ.copy()
+        xdg = env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+        env.setdefault("XDG_RUNTIME_DIR", xdg)
+        if "WAYLAND_DISPLAY" not in env:
+            try:
+                socks = sorted(n for n in os.listdir(xdg)
+                               if n.startswith("wayland-")
+                               and not n.endswith(".lock"))
+            except OSError:
+                socks = []
+            if socks:
+                env["WAYLAND_DISPLAY"] = socks[0]
+        env.setdefault("DISPLAY", ":0")
+        return env
+
     # --- ipc ---------------------------------------------------------------
     def _ipc(self, command):
         try:
@@ -66,7 +92,8 @@ class Player:
             args.append("--loop-playlist=inf")
         args += paths
 
-        self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL)
+        self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                                     env=self._display_env())
         self.current = paths
         return True
 

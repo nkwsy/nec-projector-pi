@@ -5,17 +5,31 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/projector-controller
-ExecStart=/home/pi/projector-controller/venv/bin/python app.py
+WorkingDirectory=/home/pi/nec-projector-pi
+ExecStart=/home/pi/nec-projector-pi/venv/bin/python app.py
 Restart=on-failure
 RestartSec=5
 
-# mpv needs access to the display. For a desktop (X) session, point it at the
-# logged-in display. For a headless console/DRM setup, remove the two lines below
-# and add "--vo=gpu", "--gpu-context=drm" to mpv_args in config.json instead.
-Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+# --- Headless (no desktop) display setup ---------------------------------
+# mpv renders straight to the projector via DRM/KMS (config.json mpv_args must
+# include "--vo=gpu", "--gpu-context=drm"). To modeset the screen mpv has to
+# become the DRM "master", which on a bare console needs root (or a logind
+# seat) plus a free virtual terminal to draw on. Running as root is the
+# simplest for an appliance; we hand mpv tty1 and keep it free by disabling
+# getty@tty1 (see README §5). Boot the Pi to console, not desktop.
+User=root
+TTYPath=/dev/tty1
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+
+# --- Desktop alternative -------------------------------------------------
+# If you instead run a desktop session, delete the five lines above and use:
+#   User=pi
+#   Environment=XDG_RUNTIME_DIR=/run/user/1000
+#   Environment=WAYLAND_DISPLAY=wayland-0
+#   Environment=DISPLAY=:0
+# with plain (non-DRM) mpv_args, and enable Desktop Autologin.
 
 [Install]
 WantedBy=multi-user.target

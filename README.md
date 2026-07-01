@@ -118,24 +118,43 @@ the projector model and power state. If it says *unreachable*, recheck section 3
 
 ## 5. HDMI video output (mpv)
 
-How `mpv` reaches the screen depends on whether your Pi runs a desktop:
+How `mpv` reaches the screen depends on whether your Pi runs a desktop.
 
-**Raspberry Pi OS with Desktop (recommended, simplest):** the default
-`mpv_args` in `config.json` work as-is. Enable auto-login to desktop
-(`sudo raspi-config` → System Options → Boot/Auto Login → Desktop Autologin) so
-a display session exists for `mpv` to draw into.
-
-**Raspberry Pi OS Lite (headless, no desktop):** have `mpv` render straight to
-the screen via DRM. Edit `config.json`:
+**Headless (recommended for an appliance — no desktop):** `mpv` renders straight
+to the projector via DRM/KMS. This is the default `config.json` shipped here:
 
 ```json
 "mpv_args": ["--fullscreen", "--no-terminal", "--no-osc",
              "--vo=gpu", "--gpu-context=drm", "--keep-open=no"]
 ```
 
-Test playback from the panel's **Media** tab (upload a clip, tick it, press
-**Play Selected Now**). You should see it on the projector. If you get audio over
-HDMI issues, add `--audio-device=...` (list devices with `mpv --audio-device=help`).
+Set the Pi up so nothing else owns the display:
+
+```bash
+# Boot to the text console instead of the desktop
+sudo raspi-config nonint do_boot_behaviour B1
+#   (or: sudo raspi-config → System Options → Boot / Auto Login → Console)
+
+# Free tty1 so mpv can take over the screen (the service claims it)
+sudo systemctl disable getty@tty1.service
+
+# Confirm the modern KMS driver is active (default on Bookworm):
+#   /boot/firmware/config.txt should contain  dtoverlay=vc4-kms-v3d
+```
+
+To modeset the screen `mpv` must become the DRM *master*, which on a bare
+console needs root plus a free virtual terminal — that's why the systemd unit
+(section 6) runs as `root` on `tty1`. After a reboot, test from the panel's
+**Media** tab (upload a clip, tick it, press **Play Selected Now**). If audio
+over HDMI is missing, add `--audio-device=...` to `mpv_args` (list devices with
+`mpv --audio-device=help`; ALSA HDMI is typically `alsa/hdmi:CARD=vc4hdmi0`).
+
+**Raspberry Pi OS with Desktop (alternative):** switch `mpv_args` back to the
+non-DRM defaults (drop `--vo=gpu`/`--gpu-context=drm`) and edit the service unit
+as noted in its comments. Bookworm's desktop is Wayland, so `mpv` needs
+`WAYLAND_DISPLAY`; `player.py` auto-detects the compositor socket from
+`XDG_RUNTIME_DIR`, and the unit's `Environment=` lines cover the service case.
+Enable Desktop Autologin so a session exists for `mpv` to draw into.
 
 ---
 
@@ -151,9 +170,10 @@ sudo systemctl status projector-controller      # check it's running
 journalctl -u projector-controller -f           # live logs
 ```
 
-The unit assumes user `pi` and path `/home/pi/projector-controller`; edit it if
-yours differ. For a headless/DRM setup, remove the `DISPLAY`/`XDG_RUNTIME_DIR`
-lines (see the comments inside the file).
+The unit assumes the repo lives at `/home/pi/nec-projector-pi`; edit
+`WorkingDirectory`/`ExecStart` if yours differ. As shipped it's configured for
+the **headless** setup from section 5 (runs as `root` on `tty1`); the file's
+comments show what to change for a desktop session instead.
 
 ---
 
@@ -202,6 +222,13 @@ Examples of what the scheduler covers:
 
 - **Header shows "unreachable":** ping the projector from the Pi (section 3b);
   confirm port 7142 is open; confirm network control is enabled on the projector.
+- **Nothing shows on the projector when you press Play (desktop):** Bookworm's
+  desktop is Wayland, so `mpv` needs `WAYLAND_DISPLAY`. Test from a desktop
+  terminal with `WAYLAND_DISPLAY=wayland-0 mpv --fullscreen yourclip.mp4`. If
+  that works but the service doesn't, enable **desktop autologin** (section 5) —
+  the service needs the logged-in session's `/run/user/1000` to exist. Confirm
+  the socket name with `ls /run/user/1000/wayland-*` (it's usually `wayland-0`);
+  set it in the service's `WAYLAND_DISPLAY=` line if different.
 - **Power On over LAN does nothing:** the projector must be in *Network Standby*
   (not the deepest power-saving standby) to accept a wake command. See 3a.
 - **Right after Power On, other commands fail:** the projector ignores commands
