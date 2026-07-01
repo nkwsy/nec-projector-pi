@@ -68,16 +68,29 @@ async function sendRaw() {
 async function loadMedia() {
   const { files } = await api("/api/media");
   const ul = $("mediaList"); ul.innerHTML = "";
+  const sched = $("schedFiles"); sched.innerHTML = "";
+  if (!files.length) {
+    sched.innerHTML = '<li class="hint">No files yet — upload one above.</li>';
+  }
   files.forEach(f => {
     const li = document.createElement("li");
     li.innerHTML = `<input type="checkbox" class="pick" value="${f}">
       <span class="name">${f}</span><span class="del">delete</span>`;
     li.querySelector(".del").onclick = async () => { await api("/api/media/" + encodeURIComponent(f), "DELETE"); loadMedia(); };
     ul.appendChild(li);
+
+    // Independent picker for the schedule form.
+    const sli = document.createElement("li");
+    sli.innerHTML = `<input type="checkbox" class="spick" value="${f}">
+      <span class="name">${f}</span>`;
+    sched.appendChild(sli);
   });
 }
 function selectedFiles() {
   return Array.from(document.querySelectorAll(".pick:checked")).map(c => c.value);
+}
+function scheduleFiles() {
+  return Array.from(document.querySelectorAll(".spick:checked")).map(c => c.value);
 }
 async function upload() {
   const f = $("fileInput").files[0];
@@ -107,8 +120,8 @@ const chosenDays = () => Array.from(document.querySelectorAll(".day.on")).map(d 
 
 // ---- schedules ----
 async function createSchedule() {
-  const files = selectedFiles();
-  if (!files.length) { alert("Select files in the library list first."); return; }
+  const files = scheduleFiles();
+  if (!files.length) { alert("Tick one or more files in the schedule's Files list."); return; }
   if (!$("sStart").value) { alert("Set a start time."); return; }
   const body = {
     name: $("sName").value || "Untitled",
