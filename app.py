@@ -7,6 +7,8 @@ and fires scheduled playback jobs (with optional projector power control).
 
 import json
 import os
+import shutil
+import tempfile
 import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -29,6 +31,7 @@ DEFAULTS = {
     "mpv_args": None,
     "web_port": 8080,
     "default_input": "HDMI",
+    "max_upload_mb": 4096,
     "allowed_extensions": ["mp4", "mkv", "mov", "avi", "webm", "m4v",
                            "jpg", "jpeg", "png"],
 }
@@ -44,12 +47,24 @@ def load_config():
 
 
 cfg = load_config()
+
+# Large uploads are buffered to a temp file before being saved. The default temp
+# dir (/tmp) is often a small RAM-backed tmpfs on a Pi, so a big video overflows
+# it and fails with "No space left on device" even when the SD card is nearly
+# empty. Point the temp dir at the same (roomy) filesystem as media_dir instead.
+UPLOAD_TMP = os.path.join(cfg["media_dir"], ".uploadtmp")
+os.makedirs(UPLOAD_TMP, exist_ok=True)
+tempfile.tempdir = UPLOAD_TMP
+os.environ["TMPDIR"] = UPLOAD_TMP
+
 # Work with either layout: the tidy one (templates/ + static/) or a flat repo
 # where index.html, app.js and style.css sit next to app.py.
 TEMPLATE_DIR = os.path.join(BASE, "templates") if os.path.isdir(os.path.join(BASE, "templates")) else BASE
 STATIC_DIR = os.path.join(BASE, "static") if os.path.isdir(os.path.join(BASE, "static")) else BASE
 # static_folder=None disables Flask's built-in /static route so our own handles it.
 app = Flask(__name__, static_folder=None)
+# Reject oversized uploads before they're buffered to disk.
+app.config["MAX_CONTENT_LENGTH"] = int(cfg["max_upload_mb"]) * 1024 * 1024
 pj = NECProjector(cfg["projector_ip"], cfg["projector_port"])
 player = Player(cfg["media_dir"], cfg["mpv_args"])
 scheduler = BackgroundScheduler()
@@ -208,15 +223,46 @@ def api_media_list():
     return jsonify({"files": files})
 
 
+@app.route("/api/disk")
+def api_disk():
+    total, used, free = shutil.disk_usage(cfg["media_dir"])
+    return jsonify({
+        "free_mb": round(free / 1048576),
+        "total_mb": round(total / 1048576),
+        "used_pct": round(used / total * 100),
+    })
+
+
+@app.errorhandler(413)
+def too_large(_):
+    return jsonify({"ok": False, "error": f"File exceeds max upload size "
+                    f"({cfg['max_upload_mb']} MB)"}), 413
+
+
 @app.route("/api/media", methods=["POST"])
 def api_media_upload():
-    f = request.files.get("file")
+    try:
+        f = request.files.get("file")
+    except OSError as e:
+        # Errno 28 = no space left on device while buffering the upload.
+        _, _, free = shutil.disk_usage(cfg["media_dir"])
+        return jsonify({"ok": False, "error": f"Disk write failed ({e.strerror}). "
+                        f"Only {round(free/1048576)} MB free — free up space or "
+                        f"move media_dir to a USB drive."}), 507
     if not f or f.filename == "":
         return jsonify({"ok": False, "error": "no file"}), 400
     if not allowed(f.filename):
         return jsonify({"ok": False, "error": "type not allowed"}), 400
     name = secure_filename(f.filename)
-    f.save(os.path.join(cfg["media_dir"], name))
+    dest = os.path.join(cfg["media_dir"], name)
+    try:
+        f.save(dest)
+    except OSError as e:
+        if os.path.exists(dest):
+            os.remove(dest)   # remove the partial file
+        _, _, free = shutil.disk_usage(cfg["media_dir"])
+        return jsonify({"ok": False, "error": f"Save failed ({e.strerror}). "
+                        f"Only {round(free/1048576)} MB free."}), 507
     return jsonify({"ok": True, "name": name})
 
 
