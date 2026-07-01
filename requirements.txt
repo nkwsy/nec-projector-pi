@@ -1,2 +1,5 @@
 Flask>=3.0
 APScheduler>=3.10
+# yt-dlp powers the "download from a link" feature. Keep it CURRENT — it breaks
+# against YouTube every few weeks; the setup script installs a weekly updater.
+yt-dlp>=2024.08.06
